@@ -1,0 +1,204 @@
+---
+title: "机器学习初探"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r 传统人工智能}
+numberOfLegs <- c(4, 4, 0)
+climbsTrees <- c(TRUE, FALSE, TRUE)
+
+for (i in 1:3) {
+  if (numberOfLegs[i] == 4) {
+    if (climbsTrees[i]) print("cat") else print("dog")
+  } else print("snake")
+}
+```
+```{r 下载数据集}
+#本次课程使用的数据
+#install.packages("AmesHousing")
+library(AmesHousing)
+#::的方式显示制定调用某个包的某个函数，创建一个可以处理的版本;lot_frontage, 建筑离街道的距离,lot_area, 占地面积,neighborhood, 建筑在城市的位置,gr_liv_area, 地上居住面积,bldg_type, 住宅类别(联排别墅、独栋别墅…),year_built,房屋修建日期
+ames <- AmesHousing::make_ames()
+head(ames)
+```
+
+
+```{r tidyverse}
+#install.packages("tidyverse")
+library(tidyverse)
+#install.packages(c("tibble", "dplyr", "ggplot2", "tidyr", "purrr"))
+library(tibble)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(purrr)
+#创建tibbles
+myTib <- tibble(x =  1:4,
+                y = c("london", "beijing", "las vegas", "berlin"))
+
+myTib
+#将现有数据框转换为 tibbles;When printing a tibble, <int> denotes an integer variable, <chr> denotes
+#a character variable, <dbl> denotes a floating-point number (decimal), and
+#<lgl> denotes a logical variable. 
+
+myDf <- data.frame(x =  1:4,
+                   y = c("london", "beijing", "las vegas", "berlin"))
+
+dfToTib <- as_tibble(myDf)
+
+dfToTib
+###################
+#tibbles()默认情况下不会将字符串变量转换为因子
+myDfNotFactor <- data.frame(x =  1:4,
+                            y = c("london", "beijing", "las vegas", "berlin"),
+                            stringsAsFactors = FALSE)
+
+myTib <- tibble(x =  1:4,
+                y = c("london", "beijing", "las vegas", "berlin"))
+
+class(myDfNotFactor$y)
+
+class(myTib$y)
+#如果你想让一个变量成为tibble中的一个因子，你只需将c()函数包装在factor()中
+myTib <- tibble(x =  1:4,
+                y = factor(c("london", "beijing", "las vegas", "berlin")))
+myTib
+#如果是tribble，打印适合屏幕的前10行和列数(默认情况下)
+data(starwars)
+
+starwars
+
+as.data.frame(starwars)
+
+myDf[, 1]
+
+myTib[, 1]
+
+# A tibble: 4 x 1
+
+myTib[[1]]
+
+myTib$x
+#在构建tibble时，将按顺序创建变量，以便后面的变量可以引用前面定义的变量
+sequentialTib <- tibble(nItems = c(12, 45, 107),
+                        cost = c(0.5, 1.2, 1.8),
+                        totalWorth = nItems * cost)
+
+sequentialTib
+
+```
+
+
+
+```{r dyplr}
+#引用CO2数据集
+library(tibble)
+data(CO2)
+CO2tib <- as_tibble(CO2)
+CO2tib
+library(dplyr)
+###选择感兴趣的行和/或列
+selectedData <- select(CO2tib, 1, 2, 3, 5)
+selectedData
+#筛选满足某个条件的行列
+filteredData <- filter(selectedData, uptake > 16)
+filteredData
+#按照单个植物种类进行汇总
+groupedData <- group_by(filteredData, Plant)
+groupedData
+#汇总数据,得到每组内摄取的平均值和标准差
+summarizedData <- summarize(groupedData, meanUp = mean(uptake),
+                            sdUp = sd(uptake))
+summarizedData
+#从现有变量创建一个新的变量
+mutatedData <- mutate(summarizedData,  CV = (sdUp / meanUp) * 100)
+mutatedData
+arrangedData <- arrange(mutatedData, CV)
+arrangedData
+#使用dplyr函数链接在一起
+arrangedData <- CO2tib %>%
+  select(c(1:3, 5)) %>%
+  filter(uptake > 16) %>%
+  group_by(Plant) %>%
+  summarize(meanUp = mean(uptake), sdUp = sd(uptake)) %>%
+  mutate(CV = (sdUp / meanUp) * 100) %>%
+  arrange(CV)
+
+arrangedData
+```
+
+
+```{r tidyr}
+library(tibble)
+#将不整洁的tibble转换为整齐的tibble
+library(tidyr)
+patientData <- tibble(Patient = c("A", "B", "C"),
+                      Month0 = c(21, 17, 29),
+                      Month3 = c(20, 21, 27),
+                      Month6 = c(21, 22, 23))
+patientData
+#gather()函数将数据作为第一个参数。key参数定义了新变量的名称，该变量将表示我们正在“收集”的列
+tidyPatientData <- gather(patientData, key = Month,
+                          value = BMI, -Patient)
+tidyPatientData
+#我们需要将整齐的数据转换为宽格式
+spread(tidyPatientData, key = Month, value = BMI)
+
+```
+
+
+
+```{r purrr}
+#随机产生一个list
+listOfNumerics <- list(a = rnorm(5),
+                       b = rnorm(9),
+                       c = rnorm(10))
+
+listOfNumerics
+#length()函数返回每个元素的长度
+elementLengths <- vector("list", length = 3)
+for(i in seq_along(listOfNumerics)) {
+  elementLengths[[i]] <- length(listOfNumerics[[i]])
+}
+
+elementLengths
+#map()返回对应的类型
+map(listOfNumerics, length)
+
+map_int(listOfNumerics, length)
+
+map_chr(listOfNumerics, length)
+
+#map_lgl(listOfNumerics, length)
+
+map_df(listOfNumerics, length)
+#我们通过简单地调用function()函数来定义一个函数:
+map(listOfNumerics, function(.) . + 2)
+map(listOfNumerics, ~. + 2)
+multipliers <- list(0.5, 10, 3)
+map2(.x = listOfNumerics, .y = multipliers, ~.x * .y)
+
+```
+
+
+
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

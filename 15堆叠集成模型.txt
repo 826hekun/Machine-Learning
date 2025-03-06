@@ -1,0 +1,387 @@
+---
+title: "class15"
+output: html_document
+date: "2023-02-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r 前期准备}
+# Helper packages
+library(rsample)   # for creating our train-test splits
+library(recipes)   # for minor feature engineering tasks
+
+# Modeling packages
+library(h2o)       # for fitting stacked models
+h2o.no_progress()
+h2o.init()
+
+# Load and split the Ames housing data
+ames <- AmesHousing::make_ames()
+set.seed(123)  # for reproducibility
+split <- initial_split(ames, strata = "Sale_Price")
+ames_train <- training(split)
+ames_test <- testing(split)
+
+# Make sure we have consistent categorical levels
+# recipe(Sale_Price ~ ., data = ames_train): 这里的recipe函数创建了一个数据处理方案。Sale_Price ~ .表示将Sale_Price作为目标变量，ames_train是数据集。这个方案将使用除了目标变量之外的所有变量进行建模。
+# 
+# step_other(all_nominal(), threshold = 0.05): 这是recipes包中的一个步骤函数，step_other用于处理分类变量。all_nominal()表示对所有分类变量执行该步骤，threshold = 0.05表示如果一个分类变量的水平（取值）在数据集中的出现频率低于0.05，那么将其归为一个特殊的"Other"水平。
+# 
+# prep(blueprint, training = ames_train, retain = TRUE): prep函数用于根据方案对训练数据进行准备，blueprint是之前创建的方案对象，training = ames_train指定了要对ames_train数据集进行处理，retain = TRUE表示保留原始数据的备份。
+# 
+# juice(): juice函数从准备好的方案对象中提取数据集，返回一个数据帧。
+# 
+# as.h2o(): 将数据帧转换为h2o对象，以便在h2o库中使用。
+# 
+# bake(new_data = ames_test): 使用之前准备好的方案对象对测试数据集ames_test进行转换，bake函数将测试数据应用到方案对象中。
+# 
+# as.h2o(): 将转换后的测试数据集转换为h2o对象。
+# 
+# Y <- "Sale_Price": 将目标变量的名称赋值给Y变量。
+# 
+# X <- setdiff(names(ames_train), Y): 使用setdiff函数获取除目标变量之外的所有特征变量的名称，并将其赋值给X变量。
+blueprint <- recipe(Sale_Price ~ ., data = ames_train) %>%
+  step_other(all_nominal(), threshold = 0.05)
+
+# Create training & test sets for h2o
+train_h2o <- prep(blueprint, training = ames_train, retain = TRUE) %>%
+  juice() %>%
+  as.h2o()
+test_h2o <- prep(blueprint, training = ames_train) %>%
+  bake(new_data = ames_test) %>%
+  as.h2o()
+
+# Get response and feature names
+Y <- "Sale_Price"
+X <- setdiff(names(ames_train), Y)
+```
+
+
+```{r Stacking existing models}
+# Train & cross-validate a GLM model
+# x = X: 指定训练数据中用作特征的变量。在这里，X是一个包含所有特征变量的向量。
+# 
+# y = Y: 指定训练数据中的目标变量。在这里，Y是目标变量的名称。
+# 
+# training_frame = train_h2o: 指定用于训练的数据帧，train_h2o是之前通过prep和as.h2o处理过的训练数据。
+# 
+# alpha = 0.1: 控制正则化的参数。较小的值会增加正则化的强度，有助于防止过拟合。
+
+# remove_collinear_columns = TRUE: 指定是否在训练之前删除共线性列。如果设置为TRUE，算法将删除高度相关的特征列，以避免共线性带来的问题。
+# 
+# nfolds = 10: 指定交叉验证的折数。在这里，数据将分为10个折进行交叉验证。
+# 
+# fold_assignment = "Modulo": 指定将数据分配给不同折的方式。在这里，使用"Modulo"方式进行分配。
+# 
+# keep_cross_validation_predictions = TRUE: 指定是否保留交叉验证的预测结果。如果设置为TRUE，模型在每个交叉验证折上的预测结果将被保留。
+# 
+# seed = 123: 指定随机种子的值。通过设置相同的种子值，可以确保每次运行模型时得到相同的结果。
+best_glm <- h2o.glm(
+  x = X, y = Y, training_frame = train_h2o, alpha = 0.1,
+  remove_collinear_columns = TRUE, nfolds = 10, fold_assignment = "Modulo",
+  keep_cross_validation_predictions = TRUE, seed = 123
+)
+
+# Train & cross-validate a RF model
+# x = X: 指定训练数据中用作特征的变量。在这里，X是一个包含所有特征变量的向量。
+# 
+# y = Y: 指定训练数据中的目标变量。在这里，Y是目标变量的名称。
+
+# training_frame = train_h2o: 指定用于训练的数据帧，train_h2o是之前通过prep和as.h2o处理过的训练数据。
+# 
+# ntrees = 1000: 指定随机森林中树的数量。在这里，设置为1000。
+# 
+# mtries = 20: 指定每个决策树中要考虑的特征数量。在每个节点上，算法将从这些特征中选择最佳分割。在这里，设置为20。
+# 
+# max_depth = 30: 指定决策树的最大深度。这控制了树的复杂度和拟合能力。在这里，设置最大深度为30。
+# 
+# min_rows = 1: 指定叶子节点上的最小观测数。如果叶子节点上的观测数量低于该值，就停止继续分割。在这里，设置为1，表示不限制叶子节点上的最小观测数。
+# 
+# sample_rate = 0.8: 指定用于构建每棵树的样本的采样比例。在这里，设置为0.8，表示每棵树使用训练数据的80%进行采样。
+# 
+# nfolds = 10: 指定交叉验证的折数。在这里，数据将分为10个折进行交叉验证。
+
+# fold_assignment = "Modulo": 指定将数据分配给不同折的方式。在这里，使用"Modulo"方式进行分配。
+# 
+# keep_cross_validation_predictions = TRUE: 指定是否保留交叉验证的预测结果。如果设置为TRUE，模型在每个交叉验证折上的预测结果将被保留。
+# 
+# seed = 123: 指定随机种子的值。通过设置相同的种子值，可以确保每次运行模型时得到相同的结果。
+# 
+# stopping_rounds = 50: 指定在模型训练过程中连续多少轮没有观测到性能改善时停止训练。在这里，设置为50。
+# 
+# stopping_metric = "RMSE": 指定用于决定何时停止训练的评估指标。在这里，使用均方根误差（RMSE）作为评估指标。
+# 
+# stopping_tolerance = 0: 指定停止训练的容忍度。如果连续多轮的性能改善小于或等于该值，训练将停止。在这里，设置为0，表示要求精确的性能改善
+best_rf <- h2o.randomForest(
+  x = X, y = Y, training_frame = train_h2o, ntrees = 1000, mtries = 20,
+  max_depth = 30, min_rows = 1, sample_rate = 0.8, nfolds = 10,
+  fold_assignment = "Modulo", keep_cross_validation_predictions = TRUE,
+  seed = 123, stopping_rounds = 50, stopping_metric = "RMSE",
+  stopping_tolerance = 0
+)
+
+# Train & cross-validate a GBM model
+# x = X: 指定训练数据中用作特征的变量。在这里，X是一个包含所有特征变量的向量。
+# 
+# y = Y: 指定训练数据中的目标变量。在这里，Y是目标变量的名称。
+# 
+# training_frame = train_h2o: 指定用于训练的数据帧，train_h2o是之前通过prep和as.h2o处理过的训练数据。
+# 
+# ntrees = 5000: 指定梯度提升树（Gradient Boosting Machine）中树的数量。在这里，设置为5000。
+# 
+# learn_rate = 0.01: 指定学习率，即每个树的贡献大小。较小的学习率可以提高模型的稳定性，但可能需要更多的树来达到最佳性能。在这里，设置为0.01。
+
+# max_depth = 7: 指定每棵树的最大深度。这控制了树的复杂度和拟合能力。在这里，设置最大深度为7。
+# 
+# min_rows = 5: 指定叶子节点上的最小观测数。如果叶子节点上的观测数量低于该值，就停止继续分割。在这里，设置为5。
+# 
+# sample_rate = 0.8: 指定用于构建每棵树的样本的采样比例。在这里，设置为0.8，表示每棵树使用训练数据的80%进行采样。
+# 
+# nfolds = 10: 指定交叉验证的折数。在这里，数据将分为10个折进行交叉验证。
+# 
+# fold_assignment = "Modulo": 指定将数据分配给不同折的方式。在这里，使用"Modulo"方式进行分配。
+# 
+# keep_cross_validation_predictions = TRUE: 指定是否保留交叉验证的预测结果。如果设置为TRUE，模型在每个交叉验证折上的预测结果将被保留。
+# 
+# seed = 123: 指定随机种子的值。通过设置相同的种子值，可以确保每次运行模型时得到相同的结果。
+# 
+# stopping_rounds = 50: 指定在模型训练过程中连续多少轮没有观测到性能改善时停止训练。在这里，设置为50。
+# 
+# stopping_metric = "RMSE": 指定用于决定何时停止训练的评估指标。在这里，使用均方根误差（RMSE）作为评估指标。
+# 
+# stopping_tolerance = 0: 指定停止训练的容忍度。如果连续多轮的性能改善小于或等于该值，训练将停止。在这里，设置为0，表示要求精确的性能改善。
+best_gbm <- h2o.gbm(
+  x = X, y = Y, training_frame = train_h2o, ntrees = 5000, learn_rate = 0.01,
+  max_depth = 7, min_rows = 5, sample_rate = 0.8, nfolds = 10,
+  fold_assignment = "Modulo", keep_cross_validation_predictions = TRUE,
+  seed = 123, stopping_rounds = 50, stopping_metric = "RMSE",
+  stopping_tolerance = 0
+)
+
+# Train & cross-validate an XGBoost model
+# x = X: 指定训练数据中用作特征的变量。在这里，X是一个包含所有特征变量的向量。
+# 
+# y = Y: 指定训练数据中的目标变量。在这里，Y是目标变量的名称。
+# 
+# training_frame = train_h2o: 指定用于训练的数据帧，train_h2o是之前通过prep和as.h2o处理过的训练数据。
+# 
+# ntrees = 5000: 指定XGBoost模型中树的数量。在这里，设置为5000。
+# 
+# learn_rate = 0.05: 指定学习率，即每棵树的贡献大小。较小的学习率可以提高模型的稳定性，但可能需要更多的树来达到最佳性能。在这里，设置为0.05。
+# 
+# max_depth = 3: 指定每棵树的最大深度。这控制了树的复杂度和拟合能力。在这里，设置最大深度为3。
+# 
+# min_rows = 3: 指定叶子节点上的最小观测数。如果叶子节点上的观测数量低于该值，就停止继续分割。在这里，设置为3。
+# 
+# sample_rate = 0.8: 指定用于构建每棵树的样本的采样比例。在这里，设置为0.8，表示每棵树使用训练数据的80%进行采样。
+# 
+# categorical_encoding = "Enum": 指定类别变量的编码方式。在这里，使用"Enum"编码方式，将类别变量转换为整数。
+# 
+# nfolds = 10: 指定交叉验证的折数。在这里，数据将分为10个折进行交叉验证。
+# 
+# fold_assignment = "Modulo": 指定将数据分配给不同折的方式。在这里，使用"Modulo"方式进行分配。
+# 
+# keep_cross_validation_predictions = TRUE: 指定是否保留交叉验证的预测结果。如果设置为TRUE，模型在每个交叉验证折上的预测结果将被保留。
+# 
+# seed = 123: 指定随机种子的值。通过设置相同的种子值，可以确保每次运行模型时得到相同的结果。
+# 
+# stopping_rounds = 50: 指定在模型训练过程中连续多少轮没有观测到性能改善时停止训练。在这里，设置为50。
+# 
+# stopping_metric = "RMSE": 指定用于决定何时停止训练的评估指标。在这里，使用均方根误差（RMSE）作为评估指标。
+# 
+# stopping_tolerance = 0: 指定停止训练的容忍度。如果连续多轮的性能改善小于或等于该值，训练将停止。在这里，设置为0，表示要求精确的性能改善。
+best_xgb <- h2o.xgboost(
+  x = X, y = Y, training_frame = train_h2o, ntrees = 5000, learn_rate = 0.05,
+  max_depth = 3, min_rows = 3, sample_rate = 0.8, categorical_encoding = "Enum",
+  nfolds = 10, fold_assignment = "Modulo", 
+  keep_cross_validation_predictions = TRUE, seed = 123, stopping_rounds = 50,
+  stopping_metric = "RMSE", stopping_tolerance = 0
+)
+
+# Train a stacked tree ensemble
+# x = X: 指定训练数据中用作特征的变量。在这里，X是一个包含所有特征变量的向量。
+# 
+# y = Y: 指定训练数据中的目标变量。在这里，Y是目标变量的名称。
+# 
+# training_frame = train_h2o: 指定用于训练的数据帧，train_h2o是之前通过prep和as.h2o处理过的训练数据。
+# 
+# model_id = "my_tree_ensemble": 指定集成模型的唯一标识符。在这里，设置为"my_tree_ensemble"。
+# 
+# base_models = list(best_glm, best_rf, best_gbm, best_xgb): 指定作为基模型的模型列表。在这里，使用best_glm、best_rf、best_gbm和best_xgb作为基模型。
+# 
+# metalearner_algorithm = "drf": 指定元学习器的算法。在这里，使用随机森林（Random Forest）作为元学习器的算法。
+# 
+# 通过以上参数设置，创建了一个堆叠集成模型，使用了best_glm、best_rf、best_gbm和best_xgb作为基模型，并使用随机森林作为元学习器。
+ensemble_tree <- h2o.stackedEnsemble(
+  x = X, y = Y, training_frame = train_h2o, model_id = "my_tree_ensemble",
+  base_models = list(best_glm, best_rf, best_gbm, best_xgb),
+  metalearner_algorithm = "drf"
+)
+# Get results from base learners
+# 函数使用h2o.performance函数计算模型在测试数据集test_h2o上的性能指标。然后，通过results@metrics$RMSE获取并返回均方根误差（RMSE）值。
+get_rmse <- function(model) {
+  results <- h2o.performance(model, newdata = test_h2o)
+  results@metrics$RMSE
+}
+# 这段代码将依次对 best_glm、best_rf、best_gbm 和 best_xgb 这四个模型调用 get_rmse 函数，并返回一个包含这些模型的均方根误差的双精度向量。
+list(best_glm, best_rf, best_gbm, best_xgb) %>%
+  purrr::map_dbl(get_rmse)
+
+# Stacked results
+h2o.performance(ensemble_tree, newdata = test_h2o)@metrics$RMSE
+
+data.frame(
+  GLM_pred = as.vector(h2o.getFrame(best_glm@model$cross_validation_holdout_predictions_frame_id$name)),
+  RF_pred = as.vector(h2o.getFrame(best_rf@model$cross_validation_holdout_predictions_frame_id$name)),
+  GBM_pred = as.vector(h2o.getFrame(best_gbm@model$cross_validation_holdout_predictions_frame_id$name)),
+  XGB_pred = as.vector(h2o.getFrame(best_xgb@model$cross_validation_holdout_predictions_frame_id$name))
+) %>% cor()
+```
+
+
+
+
+
+```{r Stacking a grid search}
+# Define GBM hyperparameter grid
+# 在这个例子中，hyper_grid 包含了以下超参数和对应的取值：
+# 
+# max_depth: 决策树的最大深度，可能的取值为 1、3 和 5。
+# min_rows: 叶子节点上的最小观测数，可能的取值为 1、5 和 10。
+# learn_rate: 学习率，可能的取值为 0.01、0.05 和 0.1。
+# learn_rate_annealing: 学习率退火因子，可能的取值为 0.99 和 1。
+# sample_rate: 用于构建每棵树的样本的采样比例，可能的取值为 0.5、0.75 和 1。
+# col_sample_rate: 列采样比例，可能的取值为 0.8、0.9 和 1。
+hyper_grid <- list(
+  max_depth = c(1, 3, 5),
+  min_rows = c(1, 5, 10),
+  learn_rate = c(0.01, 0.05, 0.1),
+  learn_rate_annealing = c(0.99, 1),
+  sample_rate = c(0.5, 0.75, 1),
+  col_sample_rate = c(0.8, 0.9, 1)
+)
+
+# Define random grid search criteria
+# strategy: 搜索策略的名称。在这里，使用 "RandomDiscrete" 策略，表示采用随机离散搜索的方式。这意味着在超参数空间中随机选择不同的超参数组合进行模型训练。
+# max_models: 最大模型数量。在这里，设置为 25，表示在搜索过程中最多训练 25 个模型。
+# 通过定义这样的搜索条件，可以控制模型搜索的方式和停止条件，以便在给定的搜索空间中寻找到最佳的模型配置。
+search_criteria <- list(
+  strategy = "RandomDiscrete",
+  max_models = 25
+)
+
+# Build random grid search 
+# algorithm = "gbm": 指定使用梯度提升机（GBM）算法进行训练。
+# grid_id = "gbm_grid": 指定网格搜索的唯一标识符。
+# x = X, y = Y: 指定训练数据的特征和目标变量。
+# training_frame = train_h2o: 指定用于训练的数据帧。
+# hyper_params = hyper_grid: 指定超参数的网格，即之前定义的 hyper_grid。
+# search_criteria = search_criteria: 指定搜索的条件，即之前定义的 search_criteria。
+# ntrees = 5000: 指定每个模型的树的数量。
+# stopping_metric = "RMSE": 指定用于停止训练的性能指标，这里使用均方根误差（RMSE）。
+# stopping_rounds = 10: 指定连续多少轮的性能没有改善时停止训练。
+# stopping_tolerance = 0: 指定停止训练的容忍度，这里设置为0表示要求精确的性能改善。
+# nfolds = 10: 指定交叉验证的折数。
+# fold_assignment = "Modulo": 指定交叉验证的折分配方式。
+# keep_cross_validation_predictions = TRUE: 指定是否保存交叉验证的预测结果。
+# seed = 123: 指定随机种子，用于复现训练过程的随机性。
+# 通过以上参数设置，调用h2o.grid函数进行网格搜索，返回一个包含不同超参数组合的模型列表 random_grid，每个模型都经过了交叉验证，并保存了交叉验证的预测结果。
+random_grid <- h2o.grid(
+  algorithm = "gbm", grid_id = "gbm_grid", x = X, y = Y,
+  training_frame = train_h2o, hyper_params = hyper_grid,
+  search_criteria = search_criteria, ntrees = 5000, stopping_metric = "RMSE",     
+  stopping_rounds = 10, stopping_tolerance = 0, nfolds = 10, 
+  fold_assignment = "Modulo", keep_cross_validation_predictions = TRUE,
+  seed = 123
+)
+# Sort results by RMSE
+# grid_id = "gbm_grid": 指定要获取结果的网格搜索的唯一标识符，这里是"gbm_grid"。
+# sort_by = "rmse": 指定按照均方根误差（RMSE）进行排序。
+# 通过调用h2o.getGrid函数，将返回一个按照指定指标排序的网格搜索结果。这些结果可以用于比较不同超参数组合的性能，并选择最佳的模型配置。
+h2o.getGrid(
+  grid_id = "gbm_grid", 
+  sort_by = "rmse"
+)
+
+# Grab the model_id for the top model, chosen by validation error
+# best_model_id <- random_grid@model_ids[[1]]：从网格搜索结果中获取排名第一的模型的ID，将其存储在best_model_id变量中。
+# best_model <- h2o.getModel(best_model_id)：通过模型ID获取最佳模型，并将其存储在best_model变量中。
+# h2o.performance(best_model, newdata = test_h2o)：计算最佳模型在测试集test_h2o上的性能指标。
+# 接下来，代码进行了模型集成的步骤：
+# 
+# ensemble <- h2o.stackedEnsemble(...)：使用基于GBM网格搜索结果的模型构建一个堆叠集成模型。该集成模型的基模型是网格搜索得到的各个模型，元学习器采用GBM算法。集成模型的相关参数和训练数据在函数中指定，并将结果存储在ensemble变量中。
+# h2o.performance(ensemble, newdata = test_h2o)：计算集成模型在测试集test_h2o上的性能指标。
+best_model_id <- random_grid@model_ids[[1]]
+best_model <- h2o.getModel(best_model_id)
+h2o.performance(best_model, newdata = test_h2o)
+
+# Train a stacked ensemble using the GBM grid
+ensemble <- h2o.stackedEnsemble(
+  x = X, y = Y, training_frame = train_h2o, model_id = "ensemble_gbm_grid",
+  base_models = random_grid@model_ids, metalearner_algorithm = "gbm"
+)
+
+# Eval ensemble performance on a test set
+h2o.performance(ensemble, newdata = test_h2o)
+```
+
+
+
+```{r Automated machine learning}
+# Use AutoML to find a list of candidate models (i.e., leaderboard)
+# x = X, y = Y: 指定训练数据的特征和目标变量。
+# training_frame = train_h2o: 指定用于训练的数据帧。
+# nfolds = 5: 指定交叉验证的折数。
+# max_runtime_secs = 60 * 120: 指定AutoML运行的最大时间，这里设置为2小时（120分钟）。
+# max_models = 50: 指定生成的模型数量的上限。
+# keep_cross_validation_predictions = TRUE: 指定是否保存交叉验证的预测结果。
+# sort_metric = "RMSE": 指定用于排序模型的指标，这里使用均方根误差（RMSE）。
+# seed = 123: 指定随机种子，用于复现训练过程的随机性。
+# stopping_rounds = 50: 指定连续多少轮的性能没有改善时停止训练。
+# stopping_metric = "RMSE": 指定用于停止训练的性能指标，这里使用均方根误差（RMSE）。
+# stopping_tolerance = 0: 指定停止训练的容忍度，这里设置为0表示要求精确的性能改善。
+auto_ml <- h2o.automl(
+  x = X, y = Y, training_frame = train_h2o, nfolds = 5, 
+  max_runtime_secs = 60 * 120, max_models = 50,
+  keep_cross_validation_predictions = TRUE, sort_metric = "RMSE", seed = 123,
+  stopping_rounds = 50, stopping_metric = "RMSE", stopping_tolerance = 0
+)
+# Assess the leader board; the following truncates the results to show the top 
+# 25 models. You can get the top model with auto_ml@leader
+# auto_ml@leaderboard: 获取AutoML结果中的排行榜。
+# %>% as.data.frame() %>%: 将排行榜转换为数据框形式。
+# dplyr::select(model_id, rmse): 选择模型ID和RMSE列。
+# dplyr::slice(1:25): 选择前25行。
+# 最终，得到一个数据框，包含排名前25的模型ID和对应的RMSE指标。
+# 
+# 最后，h2o.shutdown(prompt = FALSE)用于关闭H2O集群，其中prompt = FALSE表示在关闭前无需确认提示。
+# 
+# 请注意，在运行h2o.shutdown之后，将无法再次使用H2O集群的功能，除非重新启动集群。
+auto_ml@leaderboard %>% 
+  as.data.frame() %>%
+  dplyr::select(model_id, rmse) %>%
+  dplyr::slice(1:25)
+
+h2o.shutdown(prompt = FALSE)
+```
+
+
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

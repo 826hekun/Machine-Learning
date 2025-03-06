@@ -1,0 +1,472 @@
+---
+title: "class16"
+output: html_document
+date: "2023-02-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r 前期准备}
+# Helper packages
+library(dplyr)      # for data wrangling
+library(ggplot2)    # for awesome graphics
+
+# Modeling packages
+library(h2o)       # for interfacing with H2O
+library(recipes)   # for ML recipes
+library(rsample)   # for data splitting
+library(xgboost)   # for fitting GBMs
+
+# Model interpretability packages
+library(pdp)       # for partial dependence plots (and ICE curves)
+library(vip)       # for variable importance plots
+# iml: 提供了一般的解释性机器学习函数，包括特征重要性、局部解释和模型解释等。
+# DALEX: 提供了一般的解释性机器学习函数，用于模型解释和评估。
+# lime: 提供了局部可解释性模型的功能，用于解释单个样本的模型预测。
+library(iml)       # for general IML-related functions
+library(DALEX)     # for general IML-related functions
+library(lime)      # for local interpretable 
+```
+
+
+```{r 在 R 中拟合 GLRM}
+# convert data to h2o object
+# h2o.glrm(): 这个函数执行了基本的Generalized Low Rank Models (GLRM)。GLRM是一种矩阵分解技术，用于将高维数据降低到低维表示。
+# training_frame: 指定训练数据的H2O对象。
+# k: 指定降维后的低维空间的维数。
+# loss: 指定GLRM的损失函数，这里使用的是"Quadratic"，表示使用平方损失。
+# regularization_x和regularization_y: 指定对于行和列的正则化方法，这里设置为"None"表示不进行正则化。
+# transform: 指定数据的预处理方法，这里设置为"STANDARDIZE"表示进行标准化处理。
+# max_iterations: 指定GLRM算法的最大迭代次数。
+# seed: 指定随机种子用于算法的重现性。
+# summary(basic_glrm): 这个函数用于输出GLRM模型的摘要信息，包括每个特征的方差、簇中心和低维表示等。
+h2o.no_progress()
+Sys.setenv(JAVA_HOME="D:/jdk-19.0.2") # 设置java环境
+h2o.init(max_mem_size = "5g")
+my_basket.h2o <- as.h2o(my_basket)
+
+# run basic GLRM
+basic_glrm <- h2o.glrm(
+  training_frame = my_basket.h2o,
+  k = 20, 
+  loss = "Quadratic",
+  regularization_x = "None", 
+  regularization_y = "None", 
+  transform = "STANDARDIZE", 
+  max_iterations = 2000,
+  seed = 123
+)
+summary(basic_glrm)
+
+# amount of variance explained by each archetype (aka "pc")
+
+# basic_glrm@model$importance是用于获取GLRM模型的特征重要性的参数。
+# 
+# 在GLRM模型中，特征重要性表示每个特征对模型整体性能的贡献程度。特征重要性可以帮助我们理解和解释模型的结果，并识别哪些特征对于预测或数据降维起着关键作用。
+# 
+# basic_glrm@model$importance返回一个包含特征重要性信息的对象。可以通过访问该对象的属性和方法来获取特征重要性的相关信息，如每个特征的重要性得分、排序等。
+basic_glrm@model$importance
+# 首先，使用basic_glrm@model$importance从GLRM模型中获取方差解释的相关信息。然后，将这些信息整理为一个数据框(data frame)，其中包含三列：PC (Principal Component)、PVE (Proportion of Variance Explained)和CVE (Cumulative Variance Explained)。
+# 
+# 接下来，使用gather()函数将数据框进行整理，将metric列进行"melt"操作，使得每行包含一个PC的信息和相应的方差解释值。这样得到的数据框可以用于绘制不同metric下的方差解释图。
+# 
+# 最后，使用ggplot()函数创建一个基础图形对象，并使用geom_point()函数添加散点图层，将PC和对应的方差解释值进行可视化。使用facet_wrap()函数将图形按照metric进行分面展示，使得每个metric都有独立的子图。scales = "free"参数指定在分面中使用独立的y轴刻度。
+data.frame(
+    PC  = basic_glrm@model$importance %>% seq_along(),
+    PVE = basic_glrm@model$importance %>% .[2,] %>% unlist(),
+    CVE = basic_glrm@model$importance %>% .[3,] %>% unlist()
+) %>%
+    gather(metric, variance_explained, -PC) %>%
+    ggplot(aes(PC, variance_explained)) +
+    geom_point() +
+    facet_wrap(~ metric, ncol = 1, scales = "free")
+# t(basic_glrm@model$archetypes)[1:5, 1:5] 是用于提取 GLRM 模型中的原型矩阵（archetypes）的子集。其中：
+# 
+# basic_glrm 是 GLRM 模型对象。
+# @model$archetypes 是 GLRM 模型对象中的原型矩阵。
+# t() 是转置函数，用于将原型矩阵的行和列互换，以便展示。
+# [1:5, 1:5] 是用于选择原型矩阵的子集，表示提取原型矩阵的前5行和前5列。
+# 因此，t(basic_glrm@model$archetypes)[1:5, 1:5] 表示从 GLRM 模型中提取的原型矩阵的前5行和前5列，并以转置的形式呈现。这可以用于查看原型矩阵中的部分数据。
+t(basic_glrm@model$archetypes)[1:5, 1:5]
+# t(basic_glrm@model$archetypes) 是将 GLRM 模型中的原型矩阵转置，以便进行可视化。
+# %>% as.data.frame() 将原型矩阵转换为数据框格式。
+# %>% mutate(feature = row.names(.)) 添加一个名为 "feature" 的新列，其中包含原型矩阵的行名（特征名称）。
+# %>% ggplot(aes(Arch1, reorder(feature, Arch1))) 设置散点图的 x 轴为 "Arch1"（原型矩阵的第一列），y 轴为 "feature"（特征名称），并根据 "Arch1" 的值对特征名称进行重新排序。
+# geom_point() 添加散点图层，表示每个特征对应的 "Arch1" 值。
+p1 <- t(basic_glrm@model$archetypes) %>% 
+  as.data.frame() %>% 
+  mutate(feature = row.names(.)) %>%
+  ggplot(aes(Arch1, reorder(feature, Arch1))) +
+  geom_point()
+# t(basic_glrm@model$archetypes) 是将 GLRM 模型中的原型矩阵转置，以便进行可视化。
+# %>% as.data.frame() 将原型矩阵转换为数据框格式。
+# %>% mutate(feature = row.names(.)) 添加一个名为 "feature" 的新列，其中包含原型矩阵的行名（特征名称）。
+# %>% ggplot(aes(Arch1, Arch2, label = feature)) 设置散点图的 x 轴为 "Arch1"（原型矩阵的第一列），y 轴为 "Arch2"（原型矩阵的第二列），并将每个散点的标签设置为对应的特征名称。
+# geom_text() 添加文本标签层，显示每个散点对应的特征名称。
+p2 <- t(basic_glrm@model$archetypes) %>% 
+  as.data.frame() %>% 
+  mutate(feature = row.names(.)) %>%
+  ggplot(aes(Arch1, Arch2, label = feature)) +
+  geom_text()
+
+gridExtra::grid.arrange(p1, p2, nrow = 1)
+
+# Re-run model with k = 8
+# training_frame: H2O数据框，包含用于训练GLRM模型的数据。
+# k: GLRM模型的目标低秩矩阵的列数，也称为主题数或潜在特征数。
+# loss: 用于计算模型损失的损失函数。在这种情况下，选择的损失函数是"Quadratic"，即平方损失。
+# regularization_x: X矩阵（原型矩阵）的正则化方法。在这里选择的是"None"，表示不应用正则化。
+# regularization_y: Y矩阵（权重矩阵）的正则化方法。在这里选择的是"None"，表示不应用正则化。
+# transform: 数据预处理的转换方法。在这里选择的是"STANDARDIZE"，表示使用标准化方法对数据进行预处理。
+# max_iterations: 迭代的最大次数，用于训练GLRM模型。
+# seed: 随机数种子，用于生成可重复的随机结果。
+# 以上代码运行了一个GLRM模型，其中训练数据为my_basket.h2o，目标低秩矩阵的列数为8。使用平方损失函数进行模型训练，同时没有应用任何正则化。数据预处理采用标准化方法，并设置最大迭代次数为2000。随机数种子为123，以确保结果的可重复性。
+k8_glrm <- h2o.glrm(
+  training_frame = my_basket.h2o,
+  k = 8, 
+  loss = "Quadratic",
+  regularization_x = "None", 
+  regularization_y = "None", 
+  transform = "STANDARDIZE", 
+  max_iterations = 2000,
+  seed = 123
+)
+
+# Reconstruct to see how well the model did
+# k8_glrm: 先前训练好的GLRM模型，用于重构原始数据。
+# my_basket.h2o: 原始数据，用于重构。
+# reverse_transform: 指示是否在重构时反转数据预处理的转换。在这里设置为TRUE，表示应用反转转换。
+# 代码中使用h2o.reconstruct函数基于先前训练的GLRM模型对原始数据my_basket.h2o进行重构。通过设置reverse_transform = TRUE，重构过程会应用反转转换，以还原原始数据的表示。my_reconstruction是重构后的数据。
+# 
+# my_reconstruction[1:5, 1:5]显示了重构后的数据的前5行和前5列。接下来，通过使用round函数将值四舍五入到整数，可以获得整数形式的重构值。my_reconstruction[1:5, 1:5] %>% round(0)返回四舍五入后的结果。
+my_reconstruction <- h2o.reconstruct(k8_glrm, my_basket.h2o, reverse_transform = TRUE)
+
+# Raw predicted values
+my_reconstruction[1:5, 1:5]
+
+# Round values to whole integers
+my_reconstruction[1:5, 1:5] %>% round(0)
+```
+
+
+
+```{r 欠完备自编码器}
+# Convert mnist features to an h2o input data set
+library(ggplot2)
+# features: 经过转换的特征数据，用于训练自编码器。
+# mnist$train$images: MNIST数据集中的训练图像数据。
+# x: 指定要作为输入的列索引或列名。在这里，seq_along(features)返回一个包含特征列索引的向量。
+# training_frame: 训练数据集，这里是经过转换的特征数据。
+# autoencoder: 指示是否训练自编码器模型。在这里设置为TRUE。
+# hidden: 自编码器的隐藏层大小，这里设置为2，表示自编码器有两个隐藏层节点。
+# activation: 激活函数的类型，这里设置为'Tanh'，表示使用双曲正切激活函数。
+# sparse: 指示是否使用稀疏自编码器。在这里设置为TRUE，表示使用稀疏自编码器。
+# 代码中使用h2o.deeplearning函数训练了一个自编码器模型。自编码器是一种无监督学习模型，用于学习数据的低维表示。通过设置autoencoder = TRUE，模型被配置为训练自编码器。输入数据使用转换后的特征数据features进行训练。模型的隐藏层大小为2，激活函数为双曲正切，并且使用稀疏自编码器进行训练。
+features <- as.h2o(mnist$train$images)
+
+# Train an autoencoder
+ae1 <- h2o.deeplearning(
+  x = seq_along(features),
+  training_frame = features,
+  autoencoder = TRUE,
+  hidden = 2,
+  activation = 'Tanh',
+  sparse = TRUE
+)
+
+# Extract the deep features
+# ae1: 自编码器模型对象，用于提取特征。
+# features: 经过转换的特征数据，用于提取特征。
+# layer: 指定要提取特征的层级。在这里，设置为1，表示提取自编码器模型的第一个隐藏层的特征。
+# ae1_codings: 使用自编码器模型ae1提取的特征。
+# 首先，使用h2o.deepfeatures函数提取自编码器模型ae1对于输入数据features的特征表示。在这里，选择提取第一个隐藏层的特征。ae1_codings是一个包含提取的特征的H2O数据框。
+# 
+# 然后，使用as.h2o函数将MNIST数据集中的训练图像数据转换为H2O数据对象。转换后的数据存储在features中。
+# 
+# 接下来，使用h2o.prcomp函数执行主成分分析（PCA）。training_frame参数指定用于PCA的训练数据集，这里使用转换后的特征数据features。k参数设置为2，表示希望得到2个主成分。transform参数设置为'STANDARDIZE'，表示对数据进行标准化处理。
+# 
+# 执行完上述代码后，可以获得通过自编码器提取的特征表示ae1_codings，以及使用PCA获得的主成分分析结果pca1。
+ae1_codings <- h2o.deepfeatures(ae1, features, layer = 1)
+ae1_codings
+
+features <- as.h2o(mnist$train$images)
+
+# Perform PCA
+pca1 <- h2o.prcomp(
+  training_frame = features,
+  k = 2,
+  transform = 'STANDARDIZE'
+)
+
+# Plot resulting PCs
+# pca_plot: 使用PCA模型pca1对特征数据features进行预测，并将结果转换为数据框形式。通过选择PC1和PC2两个主成分作为坐标轴，创建一个散点图。散点的颜色由标签mnist$train$labels决定。该图展示了基于PCA的投影结果。
+# ae_plot: 将自编码器提取的特征表示ae1_codings转换为数据框形式。选择名为DF1和DF2的两个特征作为坐标轴，创建一个散点图。散点的颜色同样由标签mnist$train$labels决定。该图展示了基于自编码器的投影结果。
+pca_plot <- predict(pca1, features) %>%
+  as.data.frame() %>%
+  select(PC1, PC2) %>%
+  mutate(response = factor(mnist$train$labels)) %>%
+  ggplot(aes(PC1, PC2)) +
+  geom_point(aes(color = response), size = 0.5, alpha = 0.25) +
+  ggtitle('(A) PCA projection')
+
+# Plot results from autoencoder
+ae_plot <- ae1_codings %>%
+  as.data.frame() %>%
+  select(DF1 = 'DF.L1.C1', DF2 = 'DF.L1.C2') %>%
+  mutate(response = factor(mnist$train$labels)) %>%
+  ggplot(aes(DF1, DF2, color = response)) +
+  geom_point(size = .5, alpha = .25) +
+  ggtitle('(B) Autoencoder projection')
+
+# DIsplay plots side by side
+gridExtra::grid.arrange(pca_plot, ae_plot, nrow = 1)
+
+# Hyperparameter search grid
+# hyper_grid: 定义了一个超参数网格，其中包含了不同的隐藏层结构。每个隐藏层结构是一个列表，表示不同层的神经元数量。例如，c(50)表示一个隐藏层有50个神经元，c(300, 100, 300)表示三个隐藏层分别有300、100和300个神经元。
+# ae_grid: 使用网格搜索方法，对自编码器进行训练和调参。通过指定算法为'deeplearning'，特征变量为seq_along(features)（表示所有特征变量），训练数据为features，网格ID为'autoencoder_grid'，设置自编码器为TRUE，激活函数为'Tanh'，超参数为hyper_grid，稀疏性为TRUE，忽略常数列为FALSE，随机种子为123。执行网格搜索会尝试不同的超参数组合，训练多个自编码器模型。
+# h2o.getGrid('autoencoder_grid', sort_by = 'mse', decreasing = FALSE): 获取网格搜索结果，并按照均方误差（MSE）进行排序。返回结果包含了不同超参数组合下的模型性能指标，如MSE等。
+hyper_grid <- list(hidden = list(
+  c(50),
+  c(100), 
+  c(300, 100, 300),
+  c(100, 50, 100),
+  c(250, 100, 50, 100, 250)
+))
+
+# Execute grid search
+ae_grid <- h2o.grid(
+  algorithm = 'deeplearning',
+  x = seq_along(features),
+  training_frame = features,
+  grid_id = 'autoencoder_grid',
+  autoencoder = TRUE,
+  activation = 'Tanh',
+  hyper_params = hyper_grid,
+  sparse = TRUE,
+  ignore_const_cols = FALSE,
+  seed = 123
+)
+
+# Print grid details
+h2o.getGrid('autoencoder_grid', sort_by = 'mse', decreasing = FALSE)
+#Visualizing the reconstruction
+# Get sampled test images
+# index: 通过随机抽样从mnist$test$images中选取4个样本的索引。这些样本将用于展示原始图像和重建图像的对比。
+# sampled_digits: 从mnist$test$images中根据抽样索引选取的4个样本图像。为了方便处理，使用paste0("V", seq_len(ncol(sampled_digits)))为列命名，生成类似"V1"、"V2"的列名。
+# best_model_id: 从网格搜索结果ae_grid中获取表现最佳的模型的ID。
+# best_model: 使用最佳模型ID从H2O中获取最佳模型。
+# reconstructed_digits: 对抽样的图像进行重建，通过将抽样图像作为输入，使用最佳模型进行预测得到重建后的像素值。
+# names(reconstructed_digits): 为重建图像的列命名，生成类似"V1"、"V2"的列名。
+# combine: 将抽样图像和重建图像按行合并成一个数据框，用于展示原始图像和重建图像的对比。
+index <- sample(1:nrow(mnist$test$images), 4)
+sampled_digits <- mnist$test$images[index, ]
+colnames(sampled_digits) <- paste0("V", seq_len(ncol(sampled_digits)))
+
+# Predict reconstructed pixel values
+best_model_id <- ae_grid@model_ids[[1]]
+best_model <- h2o.getModel(best_model_id)
+reconstructed_digits <- predict(best_model, as.h2o(sampled_digits))
+names(reconstructed_digits) <- paste0("V", seq_len(ncol(reconstructed_digits)))
+
+combine <- rbind(sampled_digits, as.matrix(reconstructed_digits))
+
+# Plot original versus reconstructed
+par(mfrow = c(1, 3), mar = c(0, 0.5, 2, 0.5))
+layout(matrix(seq_len(nrow(combine)), 4, 2, byrow = FALSE))
+for (i in seq_len(nrow(combine))) {
+  title <- switch(as.character(i), "1" = "Original digits\n", 
+                  "5" = "Autoencoder reconstruction\n", NULL)
+  image(matrix(combine[i, ], 28, 28)[, 28:1], 
+        xaxt = "n", yaxt = "n", col = gray.colors(12, rev = TRUE),
+        main = title)
+} 
+
+
+```
+
+
+```{r 稀疏自动编码器}
+# ae100_codings: 使用最佳模型 best_model 对特征 features 进行深层特征提取，提取的特征位于第1个隐藏层（layer = 1）。
+# ae100_codings %>% as.data.frame() %>% tidyr::gather() %>% summarize(average_activation = mean(value)): 将深层特征转换为数据框，并使用gather()函数将特征列转换为键值对形式，然后计算所有特征的平均激活值（average_activation）。
+# codings: 将深层特征转换为数据框，并使用gather()函数将特征列转换为键值对形式。接下来，使用stringr::str_replace()函数将键中的字符串 "DF.L1." 替换为空字符串，然后按键（key）对特征进行分组，并计算每个特征的平均激活值（average_activation）。最后，按照平均激活值降序排列特征。
+# 通过执行上述代码，可以提取最佳自编码器模型在隐藏层的特征表示（编码），并计算这些特征的平均激活值。在codings数据框中，特征按照平均激活值降序排列，可以观察每个特征对于模型的重构性能的贡献程度。
+ae100_codings <- h2o.deepfeatures(best_model, features, layer = 1)
+ae100_codings %>% 
+    as.data.frame() %>% 
+    tidyr::gather() %>%
+    summarize(average_activation = mean(value))
+
+codings <- ae100_codings %>% 
+  as.data.frame() %>% 
+  tidyr::gather() %>%
+  mutate(key = stringr::str_replace(key, 'DF.L1.', '')) %>%
+  group_by(key) %>% 
+  summarize(average_activation = mean(value)) %>% 
+  arrange(desc(average_activation))
+# avg_activation是对codings数据框进行操作的结果，其目的是计算特征的平均激活值的平均值。
+# 
+# 使用summarize()函数对codings数据框进行操作，计算average_activation列的平均值，并将结果存储在新的列avg中。最终得到的结果是一个包含单个值的数据框，表示特征的平均激活值的平均值。
+# 
+# 这个步骤可以用来衡量整体特征的平均激活水平，提供了对模型的理解和评估。
+avg_activation <- summarize(codings, avg = mean(average_activation))
+
+ggplot(codings, aes(average_activation, reorder(key, average_activation), 
+                    color = average_activation > avg_activation$avg)) +
+  geom_vline(xintercept = avg_activation$avg, lty = 'dashed') +
+  geom_point(show.legend = FALSE, size = .75) +
+  ylab("Deep feature codings") +
+  xlab("Average activation") +
+  theme(axis.text.y = element_text(size = 3))
+# Hyperparameter search grid
+# hyper_grid: 是一个包含了sparsity_beta参数的列表。其中sparsity_beta是用于稀疏性正则化的超参数的一组候选值。
+# 
+# ae_sparsity_grid: 执行网格搜索的结果，使用深度学习算法进行训练。在网格搜索中，使用了给定的超参数候选值对模型进行训练，并选择性能最佳的模型。
+# 
+# grid_id: 网格搜索的标识符，用于唯一标识网格搜索的过程。
+# 
+# sparse_codings: 通过最佳稀疏性模型对特征进行编码得到的结果。使用h2o.deepfeatures()函数获取模型的编码输出，并对其进行后续的数据处理和分析。
+# 
+# as.data.frame(): 将编码结果转换为数据框的格式，方便进行数据操作和分析。
+# 
+# tidyr::gather(): 将数据框从宽格式转换为长格式，使得每一行代表一个特征的编码值。
+# 
+# mutate(): 对数据进行变换，使用stringr::str_replace()函数替换key列中的部分文本，去除列名中的前缀。
+# 
+# group_by(): 根据特征进行分组，以便进行后续的聚合计算。
+# 
+# summarize(): 对每个特征的编码值进行平均值计算，得到特征的平均激活值。
+# 
+# arrange(): 对特征按照平均激活值进行降序排序，以便查看具有最高平均激活值的特征。
+hyper_grid <- list(sparsity_beta = c(0.01, 0.05, 0.1, 0.2))
+
+# Execute grid search
+ae_sparsity_grid <- h2o.grid(
+  algorithm = 'deeplearning',
+  x = seq_along(features),
+  training_frame = features,
+  grid_id = 'sparsity_grid',
+  autoencoder = TRUE,
+  hidden = 100,
+  activation = 'Tanh',
+  hyper_params = hyper_grid,
+  sparse = TRUE,
+  average_activation = -0.1,
+  ignore_const_cols = FALSE,
+  seed = 123
+)
+
+# Print grid details
+h2o.getGrid('sparsity_grid', sort_by = 'mse', decreasing = FALSE)
+# best_sparse_model: 从ae_sparsity_grid中选择的最佳稀疏性模型。通过ae_sparsity_grid@model_ids[[1]]获取模型ID，然后使用h2o.getModel()函数获取对应的模型对象。
+# 
+# sparse_codings: 使用最佳稀疏性模型对输入特征features进行编码得到的结果。通过h2o.deepfeatures()函数获取模型的编码输出，并指定layer = 1表示获取第一层的编码结果。
+# 
+# 这段代码的目的是获取最佳稀疏性模型并使用该模型对输入特征进行编码，以得到稀疏编码的结果。
+best_sparse_model <- ae_sparsity_grid@model_ids[[1]] %>%
+  h2o.getModel()
+sparse_codings <- h2o.deepfeatures(best_sparse_model, features, layer = 1)
+sparse_codings <- sparse_codings %>%
+  as.data.frame() %>%
+  tidyr::gather() %>%
+  mutate(key = stringr::str_replace(key, 'DF.L1.', '')) %>%
+  group_by(key) %>%
+  summarize(average_activation = mean(value)) %>%
+  arrange(desc(average_activation))
+
+avg_activation <- summarize(sparse_codings, avg = mean(average_activation))
+
+ggplot(sparse_codings, aes(average_activation, reorder(key, average_activation), 
+                           color = average_activation > avg_activation$avg)) +
+  geom_vline(xintercept = avg_activation$avg, lty = 'dashed') +
+  geom_point(show.legend = FALSE, size = .75) +
+  ylab("Deep feature codings") +
+  xlab("Average activation") +
+  theme(axis.text.y = element_text(size = 3))
+
+
+
+
+```
+
+
+
+```{r 异常检测}
+# Extract reconstruction errors
+# reconstruction_errors: 使用最佳模型best_model对输入特征features进行重构，并计算重构误差。通过h2o.anomaly()函数获取重构误差。
+# 
+# ggplot(reconstruction_errors, aes(Reconstruction.MSE)): 使用ggplot2库创建一个绘图对象，将reconstruction_errors作为数据，将Reconstruction.MSE作为x轴变量。
+# 
+# geom_histogram(bins = 500): 在绘图对象上添加直方图层，bins = 500表示设置直方图的条数为500。
+# 
+# big_error_index: 对reconstruction_errors进行处理，添加一列obs表示观测的行号。然后按照Reconstruction.MSE降序排列，并选择前5个具有最大重构误差的观测。最后使用pull(obs)提取这些观测的行号。
+# 
+# 这段代码的目的是计算重构误差并可视化重构误差的分布，同时找出具有最大重构误差的前5个观测的行号。
+(reconstruction_errors <- h2o.anomaly(best_model, features))
+
+# Plot distribution
+reconstruction_errors <- as.data.frame(reconstruction_errors)
+ggplot(reconstruction_errors, aes(Reconstruction.MSE)) +
+  geom_histogram(bins = 500)
+
+big_error_index <- reconstruction_errors %>%
+  mutate(obs = row_number()) %>%
+  arrange(desc(Reconstruction.MSE)) %>% 
+  top_n(5, wt = Reconstruction.MSE) %>%
+  pull(obs)
+# big_error_inputs: 通过big_error_index提取具有最大重构误差的观测的行号，并将这些行作为索引从features中提取出来。然后使用as.h2o()将其转换为H2O对象。
+# 
+# big_errors: 使用best_model对big_error_inputs进行预测，并将预测结果转换为矩阵格式。
+# 
+# original_inputs: 将具有最大重构误差的观测的原始输入从features中提取出来，并转换为矩阵格式。
+# 
+# colnames(big_errors) <- colnames(original_inputs): 将big_errors的列名设置为original_inputs的列名，以保持一致性。
+# 
+# original_vs_big_errors: 将原始输入original_inputs和预测的大误差值big_errors按行合并，形成一个新的矩阵，用于比较原始输入和预测的大误差值。
+# 
+# 这段代码的目的是提取具有最大重构误差的观测的输入，并将其原始输入和预测的大误差值进行比较。结果是一个矩阵，其中每一行包含了对应的原始输入和预测的大误差值。
+big_error_inputs <- as.h2o(as.data.frame(features)[big_error_index, ])
+big_errors <- predict(best_model, big_error_inputs) %>%
+  as.matrix()
+
+original_inputs <- as.matrix(features)[big_error_index, ]
+colnames(big_errors) <- colnames(original_inputs)
+original_vs_big_errors <- rbind(original_inputs, big_errors)
+
+# plot 
+par(mfrow = c(5, 3), mar = c(0, 0.5, 2, 0.5))
+layout(matrix(seq_len(nrow(original_vs_big_errors)), 5, 2, byrow = FALSE))
+for (i in seq_len(nrow(original_vs_big_errors))) {
+  title <- NULL
+  if (i == 1) title <- "Original digits\n"
+  if (i == 6) title <- "Reconstructed digits\n"
+  
+  image(matrix(original_vs_big_errors[i, ], 28, 28)[, 28:1], 
+        xaxt = "n", yaxt = "n", col = gray.colors(4, rev = TRUE),
+        main = title)
+}  
+h2o.shutdown(prompt = FALSE)
+
+```
+
+
+
+
+
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

@@ -1,0 +1,193 @@
+---
+title: "class14"
+output: html_document
+date: "2023-02-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r 前期准备}
+# library(dplyr): 加载 dplyr 函数包，用于进行基本的数据处理和操作。
+# 
+# library(ggplot2): 加载 ggplot2 函数包，用于数据可视化和绘图。
+# 
+# library(h2o): 加载 h2o 函数包，用于执行维度缩减（dimension reduction）操作。
+# 
+# url <- "https://koalaverse.github.io/homlr/data/my_basket.csv": 定义一个变量 url，存储包含数据的 CSV 文件的 URL 地址。
+# 
+# my_basket <- readr::read_csv(url): 使用 readr 函数包中的 read_csv 函数从指定的 URL 地址读取数据，并将结果存储在变量 my_basket 中。该函数用于读取 CSV 格式的数据文件。
+# 
+# dim(my_basket): 使用 dim 函数获取 my_basket 数据框的维度信息，即行数和列数。该函数返回一个包含行数和列数的向量，例如 (nrow, ncol)。
+library(dplyr)       # basic data manipulation and plotting
+library(ggplot2)     # data visualization
+library(h2o)         # performing dimension reduction
+url <- "https://koalaverse.github.io/homlr/data/my_basket.csv"
+my_basket <- readr::read_csv(url)
+dim(my_basket) 
+```
+
+
+```{r 在 R 中执行 PCA}
+# h2o.no_progress(): 禁用 H2O 进度条显示，防止在控制台输出中显示进度条。
+# 
+# Sys.setenv(JAVA_HOME="D:/jdk-19.0.2"): 设置 Java 环境变量，指定 Java 的安装路径为 "D:/jdk-19.0.2"。
+# 
+# h2o.init(max_mem_size = "5g"): 初始化 H2O，启动 H2O 集群，并分配最大内存为 5GB。
+# 
+# my_basket.h2o <- as.h2o(my_basket): 将数据对象 my_basket 转换为 H2O 对象，以便在 H2O 环境中进行操作。
+# 
+# my_pca <- h2o.prcomp(...): 使用 H2O 中的 h2o.prcomp 函数运行主成分分析（PCA）算法。其中包括以下参数：
+# 
+# training_frame: 指定用于训练的数据框。
+# pca_method: 指定 PCA 方法，这里使用 "GramSVD" 方法。
+# k: 指定保留的主成分数量，这里使用数据框的列数。
+# transform: 指定数据标准化的方式，这里使用 "STANDARDIZE" 进行标准化。
+# impute_missing: 指定是否对缺失值进行插补。
+# max_runtime_secs: 指定算法的最大运行时间。
+# my_pca: 打印输出 my_pca 对象的信息，包括主成分分析的结果。
+# 
+# my_pca@model$eigenvectors %>% ...: 将 my_pca 对象中的特征向量提取出来，并进行可视化分析。这里包括两部分绘图操作：
+# 
+# 第一个绘图使用 ggplot 函数绘制散点图，横轴为 pc1，纵轴为重新排序后的特征名称。每个点代表一个特征。
+# 第二个绘图使用 ggplot 函数绘制散点图，并在每个点上显示特征名称。横轴为 pc1，纵轴为 pc2。
+# 相比于传统的协方差矩阵方法，GramSVD 方法在大规模数据集上具有更高的计算效率和更小的内存占用。因此，在处理大规模数据集时，使用 GramSVD 方法可以更快地进行主成分分析，并获取数据的主成分信息。
+h2o.no_progress()
+Sys.setenv(JAVA_HOME="D:/jdk-19.0.2") # 设置java环境
+h2o.init(max_mem_size = "5g")
+# convert data to h2o object
+my_basket.h2o <- as.h2o(my_basket)
+
+# run PCA
+my_pca <- h2o.prcomp(
+  training_frame = my_basket.h2o,
+  pca_method = "GramSVD",
+  k = ncol(my_basket.h2o), 
+  transform = "STANDARDIZE", 
+  impute_missing = TRUE,
+  max_runtime_secs = 1000
+)
+my_pca
+my_pca@model$eigenvectors %>% 
+  as.data.frame() %>% 
+  mutate(feature = row.names(.)) %>%
+  ggplot(aes(pc1, reorder(feature, pc1))) +
+  geom_point()
+my_pca@model$eigenvectors %>% 
+  as.data.frame() %>% 
+  mutate(feature = row.names(.)) %>%
+  ggplot(aes(pc1, pc2, label = feature)) +
+  geom_text()
+
+```
+
+
+
+```{r 选择主成分的数量}
+# 这段代码用于计算主成分分析（PCA）中的特征值（eigenvalues）和特征向量（eigenvectors），并根据特征值的大小评估主成分的重要性。
+# 
+# eigen <- my_pca@model$importance["Standard deviation", ] %>% as.vector(): 从 PCA 模型对象 my_pca 中提取标准差（standard deviation）信息，并将其转换为向量形式。
+# 
+# eigen <- unlist(lapply(eigen, function(x) x^2)): 使用 lapply 函数对特征值向量中的每个元素进行平方运算，得到特征值的平方值。
+# 
+# sum(eigen): 计算所有特征值的和，该和应等于原始数据中的变量数量。
+# 
+# which(eigen >= 1): 找到特征值大于或等于 1 的主成分的索引。
+# 
+# data.frame(PC = seq_along(eigen), Eigenvalue = unlist(eigen)): 创建一个数据框，其中包含主成分的索引（PC）和对应的特征值（Eigenvalue）。
+# 
+# ggplot(aes(PC, Eigenvalue)) + geom_point() + geom_hline(yintercept = 1, lty = "dashed", color = "red") + scale_y_continuous(breaks = 0:6) + xlab("PC") + annotate("text", x = 15, y = 1, label = "eigenvalue criteria cutoff", color = "red", size = 5, hjust = 0, vjust = -1): 使用 ggplot2 包进行数据可视化，绘制主成分的索引（PC）和对应的特征值（Eigenvalue）。代码中还包括一条虚线（dashed line），表示特征值为 1 的截断点，以及一个注释文本，标记了截断点的位置。横坐标标签为 "PC"，纵坐标的刻度范围为 0 到 6。
+# Compute eigenvalues
+eigen <- my_pca@model$importance["Standard deviation", ] %>% as.vector()
+
+
+# Calculate squared values using the lapply function
+eigen <- unlist(lapply(eigen, function(x) x^2))
+
+  
+# Sum of all eigenvalues equals number of variables
+sum(eigen)
+# Find PCs where the sum of eigenvalues is greater than or equal to 1
+
+# 在主成分分析（PCA）中，特征值表示每个主成分所解释的方差的量级。特征值越大，说明该主成分所解释的方差越多，对原始数据的贡献也就越大。
+# 
+# 寻找特征值大于或等于 1 的主成分的索引是为了确定哪些主成分对数据的解释能力较强。一般来说，我们会选择特征值大于等于 1 的主成分作为保留的重要主成分，因为它们可以解释至少一个变量的方差。
+# 
+# 通过找到特征值大于或等于 1 的主成分的索引，我们可以对主成分进行排序，确定主成分的重要性和贡献程度。这有助于简化数据，减少数据的维度，并且保留对原始数据解释能力较强的部分。
+which(eigen >= 1)
+
+data.frame(
+  PC = seq_along(eigen),
+  Eigenvalue = unlist(eigen)
+) %>%
+  ggplot(aes(PC, Eigenvalue)) +
+  geom_point() +
+  geom_hline(yintercept = 1, lty = "dashed", color = "red") +
+  scale_y_continuous(breaks = 0:6) +
+  xlab("PC") +
+  annotate("text", x = 15, y = 1, label = "eigenvalue criteria cutoff", color = "red", size = 5, hjust = 0, vjust = -1) 
+
+# Extract and plot PVE and CVE
+# 第一个代码段：
+# 
+# 创建一个数据框，其中包含主成分（PC）、个别可解释方差（PVE）和累计可解释方差（CVE）的值。
+# 使用tidyr::gather()函数将数据框转换为长格式，使得主成分、可解释方差和累计可解释方差都在同一列。
+# 使用ggplot绘制散点图，x轴为主成分（PC），y轴为可解释方差（variance_explained），并使用facet_wrap()函数将图分成不同的面板，每个面板显示不同的指标（metric）。
+
+# 个别可解释方差（PVE，Proportion of Variance Explained）是主成分分析中的一个指标，用于衡量每个主成分对总方差的贡献程度。它表示每个主成分能够解释原始数据中方差的比例。
+# 累计可解释方差（CVE，Cumulative Variance Explained）是主成分分析中的另一个指标，用于衡量主成分的累积贡献程度。它表示前n个主成分能够解释原始数据中方差的累计比例。
+data.frame(
+  PC  = my_pca@model$importance %>% seq_along(),
+  PVE = my_pca@model$importance %>% .[2,] %>% unlist(),
+  CVE = my_pca@model$importance %>% .[3,] %>% unlist()
+) %>%
+  tidyr::gather(metric, variance_explained, -PC) %>%
+  ggplot(aes(PC, variance_explained)) +
+  geom_point() +
+  facet_wrap(~ metric, ncol = 1, scales = "free")
+# 创建一个数据框，其中包含主成分（PC）、个别可解释方差（PVE）和累计可解释方差（CVE）的值。
+# 使用min()函数找到累计可解释方差大于等于0.75的最小主成分的索引。
+# 创建一个新的数据框，其中包含主成分（PC）和个别可解释方差（PVE）的值。
+# 使用ggplot绘制折线图，x轴为主成分（PC），y轴为个别可解释方差（PVE），并使用geom_text()函数在每个数据点上标注主成分的值。
+ve <- data.frame(
+  PC  = my_pca@model$importance %>% names(),
+  PVE = my_pca@model$importance %>% .[2,] %>% unlist(),
+  CVE = my_pca@model$importance %>% .[3,] %>% unlist()
+)
+
+# How many PCs required to explain at least 75% of total variability
+min(which(ve$CVE >= 0.75))
+data.frame(
+  PC  = my_pca@model$importance %>% seq_along,
+  PVE = my_pca@model$importance %>% .[2,] %>% unlist()
+) %>%
+  ggplot(aes(PC, PVE, group = 1, label = PC)) +
+  geom_point() +
+  geom_line() +
+  geom_text(nudge_y = -.002)
+
+h2o.shutdown(prompt = FALSE)
+
+```
+
+
+
+
+
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
